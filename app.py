@@ -514,44 +514,61 @@ def main():
             except Exception as e:
                 print(f"续期按钮点击失败: {e}")
 
-            print("⏳ 等待新的过期时间...")
-            sb.sleep(6)
+            print("⏳ 等待服务器处理续期请求 (等待5秒)...")
+            sb.sleep(5)
+
+            # 关键优化：重新加载账单页，确保获取服务端最新 DOM 与到期时间
+            print("🔄 重新加载账单页以获取最新状态...")
+            sb.open("https://bot-hosting.net/a/billings")
+            sb.wait_for_ready_state_complete()
+            sb.sleep(3)
 
             # 提取新的到期日期和倒计时
             new_page_text = sb.get_page_source()
             new_expiry = extract_expiry_date(new_page_text)
             new_match = re.search(r"Renew in (\d{2}:\d{2}:\d{2})", new_page_text)
+
             if new_match:
                 new_countdown = new_match.group(1)
-                print(f"✅ 续期成功！新的倒计时: {new_countdown}")
+                friendly_countdown = format_countdown(new_countdown)
+                print(f"✅ 续期成功！下次可续期倒计时: {new_countdown} ({friendly_countdown})")
                 if new_expiry:
-                    print(f"📅 新的到期日期: {new_expiry}")
+                    print(f"📅 最新到期日期: {new_expiry}")
                 send_telegram_message(
                     format_notification(
                         "✅ 续期成功",
-                        extra=f"⏱️ 可续期时间: {format_countdown(new_countdown)}后",
-                        expiry_date=new_expiry or "（未获取到）"
+                        extra=f"⏱️ 下次可续期时间: {friendly_countdown}后",
+                        expiry_date=new_expiry or current_expiry or "（未获取到）"
+                    )
+                )
+            elif new_expiry and new_expiry != current_expiry:
+                print(f"✅ 续期成功，到期日期已更新为: {new_expiry}")
+                send_telegram_message(
+                    format_notification(
+                        "✅ 续期成功",
+                        extra="到期日期已更新",
+                        expiry_date=new_expiry
+                    )
+                )
+            elif modal_button_clicked:
+                # 续期按钮已成功点击且通过了验证，即使因4天上限未跨天，也属于正常成功续期
+                print(f"✅ 续期已提交成功，当前到期时间: {new_expiry or current_expiry}")
+                send_telegram_message(
+                    format_notification(
+                        "✅ 续期已成功提交",
+                        extra="已通过 Turnstile 验证并成功点击续期按钮",
+                        expiry_date=new_expiry or current_expiry or "（未获取到）"
                     )
                 )
             else:
-                if new_expiry and new_expiry != current_expiry:
-                    print(f"✅ 续期成功，到期日期已更新为: {new_expiry}")
-                    send_telegram_message(
-                        format_notification(
-                            "✅ 续期成功",
-                            extra="到期日期已更新",
-                            expiry_date=new_expiry
-                        )
+                print("⚠️ 续期结果未知，请手动检查")
+                send_telegram_message(
+                    format_notification(
+                        "⚠️ 续期可能未成功",
+                        extra="请登录后台检查",
+                        expiry_date=current_expiry or "（未获取到）"
                     )
-                else:
-                    print("⚠️ 续期结果未知，到期日期未变化，请手动检查")
-                    send_telegram_message(
-                        format_notification(
-                            "⚠️ 续期可能未成功",
-                            extra="请登录后台检查",
-                            expiry_date=current_expiry or "（未获取到）"
-                        )
-                    )
+                )
 
         else:
             if countdown_text:
