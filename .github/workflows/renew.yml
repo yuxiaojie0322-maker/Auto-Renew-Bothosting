@@ -34,10 +34,10 @@ jobs:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
           if [ -n "$NODE_LINK" ]; then
-            echo "正在启动代理..."
             bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
           else
             echo "未设置 NODE_LINK，跳过代理启动"
+            echo "IS_PROXY=false" >> $GITHUB_ENV
           fi
 
       - name: 🚀 运行续期脚本
@@ -48,8 +48,6 @@ jobs:
           SESSION_TOKEN: ${{ secrets.SESSION_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          IS_PROXY: ${{ secrets.NODE_LINK != '' }}
-          PROXY_SERVER: "http://127.0.0.1:1080"
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           xvfb-run --auto-servernum -s "-screen 0 1920x1080x24" python3 app.py
