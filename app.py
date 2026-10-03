@@ -68,8 +68,12 @@ def update_github_secret(secret_name, new_value):
         env = os.environ.copy()
         if GH_TOKEN:
             env["GH_TOKEN"] = GH_TOKEN
+        cmd = ["gh", "secret", "set", secret_name, "--body", new_value]
+        repo = os.environ.get("GITHUB_REPOSITORY", "")
+        if repo:
+            cmd.extend(["-R", repo])
         proc = subprocess.run(
-            ["gh", "secret", "set", secret_name, "--body", new_value],
+            cmd,
             capture_output=True, text=True, timeout=30, check=False,
             env=env
         )

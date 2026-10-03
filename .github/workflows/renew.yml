@@ -2,7 +2,7 @@ name: Auto Renew Bot-hosting
 
 on:
   schedule:
-    - cron: '30 22 * * *' # 每天UTC 1点 (北京时间9点, 一般都会推迟),自行根据服务到期时间调整
+    - cron: '30 1 * * *' # 每天UTC 1:30 (北京时间 09:30)
   workflow_dispatch:
 
 jobs:
@@ -13,10 +13,11 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v6
+      - name: 检出代码
+        uses: actions/checkout@v4
 
       - name: ⚙ 设置 Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
@@ -24,7 +25,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb x11-utils xdotool scrot fonts-noto-cjk jq wget
-          pip install seleniumbase requests
+          pip install --no-cache-dir seleniumbase requests
           seleniumbase install chromedriver
 
       - name: ⚙ 设置代理 (sing-box)
@@ -32,7 +33,11 @@ jobs:
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
         run: |
-          bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
+          if [ -n "$NODE_LINK" ]; then
+            bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
+          else
+            echo "未设置 NODE_LINK，跳过代理启动"
+          fi
 
       - name: 🚀 运行续期脚本
         env:
@@ -42,8 +47,11 @@ jobs:
           SESSION_TOKEN: ${{ secrets.SESSION_TOKEN }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          IS_PROXY: ${{ secrets.NODE_LINK != '' }}
+          PROXY_SERVER: "http://127.0.0.1:1080"
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
-          xvfb-run --auto-servernum python3 app.py
+          xvfb-run --auto-servernum -s "-screen 0 1920x1080x24" python3 app.py
 
       - name: 🧽 清理进程和临时文件
         if: always()
