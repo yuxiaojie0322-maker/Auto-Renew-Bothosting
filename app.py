@@ -128,34 +128,85 @@ def format_notification(status: str, extra: str = "", error: str = "", expiry_da
     lines.append(f"⏱️ 登录时间: {now}")
     return "\n".join(lines)
 
+# 检测并自动关闭 GDPR / Cookie 授权弹窗（避免遮挡主要界面与点击）
+def handle_consent_dialog(sb):
+    print("🛡️ 检测是否存在 GDPR / Cookie 授权遮罩弹窗...")
+    consent_selectors = [
+        'button:contains("Consent")',
+        'button:contains("Do not consent")',
+        '.fc-cta-consent',
+        '.fc-cta-do-not-consent',
+        'button[aria-label="Consent"]',
+        'button[aria-label="Do not consent"]',
+        'button:contains("Accept")',
+        'button:contains("Agree")',
+    ]
+    for sel in consent_selectors:
+        try:
+            if sb.is_element_visible(sel):
+                print(f"👉 检测到授权弹窗，点击: {sel}")
+                sb.click(sel)
+                sb.sleep(2)
+                print("✅ 已关闭授权弹窗")
+                return True
+        except Exception:
+            pass
+
+    try:
+        js_code = """
+            (() => {
+                const buttons = Array.from(document.querySelectorAll('button'));
+                const btn = buttons.find(b => {
+                    const t = (b.innerText || '').trim().toLowerCase();
+                    return t === 'consent' || t === 'do not consent' || t === 'accept' || t === 'agree';
+                });
+                if (btn) {
+                    btn.click();
+                    return true;
+                }
+                return false;
+            })()
+        """
+        clicked = sb.execute_script(js_code)
+        if clicked:
+            print("✅ 已通过 JS 关闭授权弹窗")
+            sb.sleep(2)
+            return True
+    except Exception:
+        pass
+    return False
+
 # 深度检测 Turnstile 验证状态及弹窗续期按钮状态
 def check_turnstile_status(sb):
+    # 使用立即执行函数 (IIFE) 避免 CDP 执行环境报 'Illegal return statement'
     js_code = """
-        const tokenInput = document.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"], [name="cf-turnstile-response"]');
-        const tokenVal = tokenInput ? (tokenInput.value || '').trim() : '';
-        
-        let tokenByApi = '';
-        if (window.turnstile && typeof window.turnstile.getResponse === 'function') {
-            try { tokenByApi = (window.turnstile.getResponse() || '').trim(); } catch(e) {}
-        }
-        
-        const hasToken = (tokenVal.length > 10) || (tokenByApi.length > 10);
-        
-        const buttons = Array.from(document.querySelectorAll('button'));
-        const modalBtn = buttons.find(b => {
-            const txt = (b.innerText || '').toLowerCase();
-            return txt.includes('renew for 4') || txt.includes('renew for 4 days');
-        });
-        
-        const btnEnabled = modalBtn ? (!modalBtn.disabled && !modalBtn.hasAttribute('disabled')) : false;
-        
-        return {
-            hasToken: hasToken,
-            tokenLen: Math.max(tokenVal.length, tokenByApi.length),
-            btnFound: Boolean(modalBtn),
-            btnEnabled: btnEnabled,
-            btnText: modalBtn ? (modalBtn.innerText || '').trim() : ''
-        };
+        (() => {
+            const tokenInput = document.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"], [name="cf-turnstile-response"]');
+            const tokenVal = tokenInput ? (tokenInput.value || '').trim() : '';
+            
+            let tokenByApi = '';
+            if (window.turnstile && typeof window.turnstile.getResponse === 'function') {
+                try { tokenByApi = (window.turnstile.getResponse() || '').trim(); } catch(e) {}
+            }
+            
+            const hasToken = (tokenVal.length > 10) || (tokenByApi.length > 10);
+            
+            const buttons = Array.from(document.querySelectorAll('button'));
+            const modalBtn = buttons.find(b => {
+                const txt = (b.innerText || '').toLowerCase();
+                return txt.includes('renew for 4') || txt.includes('renew for 4 days');
+            });
+            
+            const btnEnabled = modalBtn ? (!modalBtn.disabled && !modalBtn.hasAttribute('disabled')) : false;
+            
+            return {
+                hasToken: hasToken,
+                tokenLen: Math.max(tokenVal.length, tokenByApi.length),
+                btnFound: Boolean(modalBtn),
+                btnEnabled: btnEnabled,
+                btnText: modalBtn ? (modalBtn.innerText || '').trim() : ''
+            };
+        })()
     """
     try:
         res = sb.execute_script(js_code)
@@ -479,6 +530,7 @@ def main():
             if "/a/billings" in current_url and "/login" not in current_url and "error=" not in current_url:
                 login_ok = True
                 print("✅ SESSION_TOKEN 登录成功, 当前已到达账单页")
+                handle_consent_dialog(sb)
             else:
                 print(f"❌ SESSION_TOKEN 登录失败，当前URL: {current_url}, 当前标题: {current_title}")
 
@@ -514,6 +566,10 @@ def main():
 
         if _LOGIN_METHOD == "Discord Token":
             print("ℹ️ 本次使用 Discord OAuth 登录，新的 SESSION_TOKEN 将自动更新到 Secrets")
+
+        # 确保无遮罩弹窗阻挡页面交互
+        handle_consent_dialog(sb)
+        sb.sleep(1)
 
         # 提取当前到期日期
         sb.sleep(2)
@@ -553,10 +609,12 @@ def main():
 
         # 点击外部续期按钮等待弹窗
         if outer_renew_selector:
+            # 确保关闭可能阻挡点击的 Consent 弹窗
+            handle_consent_dialog(sb)
             print("🔄 点击外部续期按钮，等待弹窗加载...")
             sb.save_screenshot("step1_before_outer_click.png")
             try:
-                sb.sleep(2)
+                sb.sleep(1)
                 sb.click(outer_renew_selector)
                 print("✅ 外部续期按钮已点击")
                 sb.sleep(8)  # 等待模态框及其内的 Turnstile 组件加载
@@ -601,16 +659,18 @@ def main():
             if not modal_button_clicked:
                 try:
                     js_click = """
-                        const buttons = Array.from(document.querySelectorAll('button'));
-                        const btn = buttons.find(b => {
-                            const txt = (b.innerText || '').toLowerCase();
-                            return txt.includes('renew for 4');
-                        });
-                        if (btn) {
-                            btn.click();
-                            return true;
-                        }
-                        return false;
+                        (() => {
+                            const buttons = Array.from(document.querySelectorAll('button'));
+                            const btn = buttons.find(b => {
+                                const txt = (b.innerText || '').toLowerCase();
+                                return txt.includes('renew for 4');
+                            });
+                            if (btn) {
+                                btn.click();
+                                return true;
+                            }
+                            return false;
+                        })()
                     """
                     clicked = sb.execute_script(js_click)
                     if clicked:
