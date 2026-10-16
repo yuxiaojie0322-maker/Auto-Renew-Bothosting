@@ -177,8 +177,8 @@ def handle_consent_dialog(sb):
     return False
 
 # 深度检测 Turnstile 验证状态及弹窗续期按钮状态
+# 深度检测 Turnstile 验证状态及弹窗续期按钮状态
 def check_turnstile_status(sb):
-    # 使用立即执行函数 (IIFE) 避免 CDP 执行环境报 'Illegal return statement'
     js_code = """
         (() => {
             const tokenInput = document.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"], [name="cf-turnstile-response"]');
@@ -191,20 +191,24 @@ def check_turnstile_status(sb):
             
             const hasToken = (tokenVal.length > 10) || (tokenByApi.length > 10);
             
-            const buttons = Array.from(document.querySelectorAll('button'));
-            const modalBtn = buttons.find(b => {
-                const txt = (b.innerText || '').toLowerCase();
-                return txt.includes('renew for 4') || txt.includes('renew for 4 days');
+            const allElements = Array.from(document.querySelectorAll('button, a, div[role="button"], span'));
+            const modalBtn = allElements.find(b => {
+                const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                return txt.includes('renew for 4') || txt === 'renew for 4 days';
             });
             
-            const btnEnabled = modalBtn ? (!modalBtn.disabled && !modalBtn.hasAttribute('disabled')) : false;
+            // 判断弹窗是否依然存在（标题或按钮）
+            const bodyTxt = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+            const isModalOpen = bodyTxt.includes('Renew your Free plan') || bodyTxt.includes('Renew for 4 days') || Boolean(modalBtn);
+
+            const btnEnabled = modalBtn ? (!modalBtn.disabled && !modalBtn.hasAttribute('disabled') && !modalBtn.classList.contains('disabled') && !modalBtn.classList.contains('opacity-50')) : false;
             
             return {
                 hasToken: hasToken,
                 tokenLen: Math.max(tokenVal.length, tokenByApi.length),
-                btnFound: Boolean(modalBtn),
+                btnFound: isModalOpen,
                 btnEnabled: btnEnabled,
-                btnText: modalBtn ? (modalBtn.innerText || '').trim() : ''
+                btnText: modalBtn ? (modalBtn.innerText || modalBtn.textContent || '').trim() : ''
             };
         })()
     """
@@ -220,19 +224,13 @@ def check_turnstile_status(sb):
 def protect_modal(sb):
     js_protect = """
         (() => {
-            // 锁定遮罩层阻止 pointer-events 或阻止冒泡，避免误触外部关闭弹窗
-            document.querySelectorAll('.fixed, .inset-0, [class*="backdrop"]').forEach(el => {
-                if (!el.querySelector('iframe, button')) {
-                    el.style.pointerEvents = 'none';
-                }
+            // 仅对独立的遮罩层阻止 pointer-events，不影响弹窗本体
+            const backdrops = Array.from(document.querySelectorAll('.fixed, .inset-0')).filter(el => {
+                return !el.querySelector('button, iframe, input, [role="dialog"]');
             });
-            // 阻止 ESC 键或全局点击关闭弹窗
-            window.addEventListener('click', e => {
-                if (e.target && (e.target.classList.contains('fixed') || e.target.classList.contains('inset-0'))) {
-                    e.stopImmediatePropagation();
-                    e.preventDefault();
-                }
-            }, true);
+            backdrops.forEach(el => {
+                el.style.pointerEvents = 'none';
+            });
         })()
     """
     try:
@@ -242,22 +240,47 @@ def protect_modal(sb):
 
 # 精准点击 Turnstile 验证码复选框
 def click_turnstile_checkbox(sb):
-    # 1. 优先获取 Turnstile iframe 的精准坐标并用 CDP 原生鼠标事件点击
+    # 1. 优先获取 Turnstile iframe 或容器的精准坐标
     try:
         coords = sb.execute_script("""
             (() => {
-                const f = document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="cloudflare.com"]');
-                if (!f) return null;
-                const r = f.getBoundingClientRect();
-                if (r.width === 0 || r.height === 0) return null;
-                return {
-                    x: Math.round(r.left + 30),
-                    y: Math.round(r.top + r.height / 2)
-                };
+                const iframes = Array.from(document.querySelectorAll('iframe'));
+                let f = iframes.find(i => {
+                    const src = (i.src || '').toLowerCase();
+                    return src.includes('cloudflare') || src.includes('challenges');
+                });
+                if (!f) {
+                    f = iframes.find(i => {
+                        const r = i.getBoundingClientRect();
+                        return r.width >= 100 && r.width <= 400 && r.height >= 40 && r.height <= 150;
+                    });
+                }
+                if (f) {
+                    const r = f.getBoundingClientRect();
+                    return {
+                        x: Math.round(r.left + 30),
+                        y: Math.round(r.top + r.height / 2),
+                        w: Math.round(r.width),
+                        h: Math.round(r.height),
+                        src: f.src ? 'iframe-src' : 'iframe-dim'
+                    };
+                }
+                const container = document.querySelector('.cf-turnstile, [data-sitekey], [class*="turnstile"]');
+                if (container) {
+                    const r = container.getBoundingClientRect();
+                    return {
+                        x: Math.round(r.left + 35),
+                        y: Math.round(r.top + 35),
+                        w: Math.round(r.width),
+                        h: Math.round(r.height),
+                        src: 'container'
+                    };
+                }
+                return null;
             })()
         """)
         if coords and coords.get("x") and coords.get("y"):
-            print(f"🎯 定位到 Turnstile 复选框坐标: ({coords['x']}, {coords['y']})，正在通过 CDP 模拟原生点击...")
+            print(f"🎯 定位到 Turnstile [{coords.get('src')}] 坐标: ({coords['x']}, {coords['y']})，正在通过 CDP 模拟原生点击...")
             sb.execute_cdp_cmd("Input.dispatchMouseEvent", {
                 "type": "mousePressed",
                 "x": coords["x"],
@@ -277,25 +300,21 @@ def click_turnstile_checkbox(sb):
     except Exception as e:
         print(f"⚠️ CDP 点击异常: {e}")
 
-    # 2. 备用方案：通过 uc_click 点击 iframe 元素
+    # 2. 备用方案：按尺寸匹配 iframe 穿透进入点击内部元素
     try:
-        sb.uc_click('iframe[src*="challenges.cloudflare.com"], iframe[src*="cloudflare.com"]')
-        return True
-    except Exception:
-        pass
-
-    # 3. 备用方案：穿透 iframe 点击内部的 checkbox 或 label（绝不要点 body）
-    try:
-        cf_frames = sb.find_elements('iframe[src*="challenges.cloudflare.com"], iframe[src*="cloudflare.com"]')
+        cf_frames = sb.find_elements('iframe')
         for frame in cf_frames:
             try:
-                sb.switch_to_frame(frame)
-                for sel in ['input[type="checkbox"]', '#cf-stage input', '.cb-i', 'span.mark', 'label.cb-lb', 'label']:
-                    if sb.is_element_visible(sel):
-                        sb.click(sel)
-                        sb.switch_to_default_content()
-                        return True
-                sb.switch_to_default_content()
+                r = sb.execute_script("const r = arguments[0].getBoundingClientRect(); return {w: r.width, h: r.height};", frame)
+                if r and 100 <= r.get('w', 0) <= 400 and 40 <= r.get('h', 0) <= 150:
+                    sb.switch_to_frame(frame)
+                    for sel in ['input[type="checkbox"]', '#cf-stage input', '.cb-i', 'span.mark', 'label.cb-lb', 'label']:
+                        if sb.is_element_visible(sel):
+                            sb.click(sel)
+                            print(f"👉 已在 iframe 内部点击验证元素: {sel}")
+                            sb.switch_to_default_content()
+                            return True
+                    sb.switch_to_default_content()
             except Exception:
                 sb.switch_to_default_content()
     except Exception:
@@ -319,9 +338,9 @@ def wait_for_turnstile_pass(sb, timeout=60):
             print(f"✅ Turnstile 人机验证已通过！(Token长度: {status['tokenLen']}, 续期按钮已就绪: {status['btnEnabled']})")
             return True
 
-        # 如果弹窗被意外关闭，重新点击外部续期按钮打开弹窗
+        # 如果弹窗确实被关闭，重新尝试点击外部续期按钮
         if not status["btnFound"]:
-            print("⚠️ 检测到弹窗已关闭或未就绪，重新尝试点击外部续期按钮...")
+            print("⚠️ 检测到弹窗已关闭，尝试重新点击外部续期按钮...")
             try:
                 for sel in ['button:contains("Renew free plan")', 'button:contains("Renew")']:
                     if sb.is_element_visible(sel):
@@ -332,8 +351,8 @@ def wait_for_turnstile_pass(sb, timeout=60):
             except Exception:
                 pass
 
-        # 每隔 5 秒尝试触发一次精准点击
-        if time.time() - last_click_time > 5:
+        # 每隔 4 秒尝试触发一次精准点击
+        if time.time() - last_click_time > 4:
             protect_modal(sb)
             clicked = click_turnstile_checkbox(sb)
             if clicked:
@@ -738,9 +757,9 @@ def main():
                 try:
                     js_click = """
                         (() => {
-                            const buttons = Array.from(document.querySelectorAll('button'));
-                            const btn = buttons.find(b => {
-                                const txt = (b.innerText || '').toLowerCase();
+                            const elements = Array.from(document.querySelectorAll('button, a, div[role="button"], [class*="button"]'));
+                            const btn = elements.find(b => {
+                                const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
                                 return txt.includes('renew for 4');
                             });
                             if (btn) {
