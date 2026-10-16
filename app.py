@@ -239,47 +239,82 @@ def protect_modal(sb):
 
 # 精准点击 Turnstile 验证码复选框
 def click_turnstile_checkbox(sb):
-    # 1. 优先获取 Turnstile iframe 或容器的精准坐标
+    # 0. 优先尝试 SeleniumBase UC 模式内置验证码点击器
+    try:
+        if hasattr(sb, "uc_gui_click_captcha"):
+            print("🤖 尝试调用 SeleniumBase 内置 uc_gui_click_captcha()...")
+            sb.uc_gui_click_captcha()
+            sb.sleep(1)
+    except Exception as e:
+        print(f"⚠️ 内置 uc_gui_click_captcha 跳过: {e}")
+
+    # 1. 尝试多维度获取 Turnstile 复选框或容器的绝对屏幕坐标
     try:
         coords = sb.execute_script("""
             return (() => {
+                // A. 遍历页面所有 iframe（包括深度查找）
                 const iframes = Array.from(document.querySelectorAll('iframe'));
-                let f = iframes.find(i => {
+                for (const i of iframes) {
                     const src = (i.src || '').toLowerCase();
-                    return src.includes('cloudflare') || src.includes('challenges');
+                    const r = i.getBoundingClientRect();
+                    if ((src.includes('cloudflare') || src.includes('challenges') || (r.width >= 100 && r.width <= 400 && r.height >= 40 && r.height <= 150)) && r.width > 0 && r.height > 0) {
+                        return {
+                            x: Math.round(r.left + 30),
+                            y: Math.round(r.top + r.height / 2),
+                            w: Math.round(r.width),
+                            h: Math.round(r.height),
+                            src: 'iframe'
+                        };
+                    }
+                }
+
+                // B. 通过 Turnstile 容器或相关 class 查找
+                const containers = Array.from(document.querySelectorAll('.cf-turnstile, [data-sitekey], [class*="turnstile"], div[style*="width: 300px"]'));
+                for (const c of containers) {
+                    const r = c.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) {
+                        return {
+                            x: Math.round(r.left + 35),
+                            y: Math.round(r.top + 35),
+                            w: Math.round(r.width),
+                            h: Math.round(r.height),
+                            src: 'container'
+                        };
+                    }
+                }
+
+                // C. 通过文本锚点 "Bot check" 相对定位
+                const allElems = Array.from(document.querySelectorAll('*'));
+                const botCheckHeader = allElems.find(el => {
+                    const t = (el.innerText || el.textContent || '').trim();
+                    return t === 'Bot check' || t.includes('1 Bot check');
                 });
-                if (!f) {
-                    f = iframes.find(i => {
-                        const r = i.getBoundingClientRect();
-                        return r.width >= 100 && r.width <= 400 && r.height >= 40 && r.height <= 150;
-                    });
+                if (botCheckHeader) {
+                    const r = botCheckHeader.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) {
+                        return {
+                            x: Math.round(r.left + 35),
+                            y: Math.round(r.bottom + 40),
+                            w: 300,
+                            h: 65,
+                            src: 'anchor-bot-check'
+                        };
+                    }
                 }
-                if (f) {
-                    const r = f.getBoundingClientRect();
-                    return {
-                        x: Math.round(r.left + 30),
-                        y: Math.round(r.top + r.height / 2),
-                        w: Math.round(r.width),
-                        h: Math.round(r.height),
-                        src: f.src ? 'iframe-src' : 'iframe-dim'
-                    };
-                }
-                const container = document.querySelector('.cf-turnstile, [data-sitekey], [class*="turnstile"]');
-                if (container) {
-                    const r = container.getBoundingClientRect();
-                    return {
-                        x: Math.round(r.left + 35),
-                        y: Math.round(r.top + 35),
-                        w: Math.round(r.width),
-                        h: Math.round(r.height),
-                        src: 'container'
-                    };
-                }
+
                 return null;
             })();
         """)
         if coords and coords.get("x") and coords.get("y"):
-            print(f"🎯 定位到 Turnstile [{coords.get('src')}] 坐标: ({coords['x']}, {coords['y']})，正在通过 CDP 模拟原生点击...")
+            print(f"🎯 定位到 Turnstile [{coords.get('src')}] 坐标: ({coords['x']}, {coords['y']})，正在通过 CDP 模拟原生真实鼠标移动和点击...")
+            # 模拟鼠标移动到复选框位置
+            sb.execute_cdp_cmd("Input.dispatchMouseEvent", {
+                "type": "mouseMoved",
+                "x": coords["x"],
+                "y": coords["y"]
+            })
+            time.sleep(0.1)
+            # 模拟鼠标按下
             sb.execute_cdp_cmd("Input.dispatchMouseEvent", {
                 "type": "mousePressed",
                 "x": coords["x"],
@@ -287,7 +322,8 @@ def click_turnstile_checkbox(sb):
                 "button": "left",
                 "clickCount": 1
             })
-            time.sleep(0.12)
+            time.sleep(0.15)
+            # 模拟鼠标抬起
             sb.execute_cdp_cmd("Input.dispatchMouseEvent", {
                 "type": "mouseReleased",
                 "x": coords["x"],
@@ -295,7 +331,10 @@ def click_turnstile_checkbox(sb):
                 "button": "left",
                 "clickCount": 1
             })
+            print("✅ CDP 鼠标点击事件已下发")
             return True
+        else:
+            print("⚠️ 未能获取到 Turnstile 坐标 (coords 为空)")
     except Exception as e:
         print(f"⚠️ CDP 点击异常: {e}")
 
