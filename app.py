@@ -154,10 +154,10 @@ def handle_consent_dialog(sb):
 
     try:
         js_code = """
-            (() => {
+            return (() => {
                 const buttons = Array.from(document.querySelectorAll('button'));
                 const btn = buttons.find(b => {
-                    const t = (b.innerText || '').trim().toLowerCase();
+                    const t = (b.innerText || b.textContent || '').trim().toLowerCase();
                     return t === 'consent' || t === 'do not consent' || t === 'accept' || t === 'agree';
                 });
                 if (btn) {
@@ -165,7 +165,7 @@ def handle_consent_dialog(sb):
                     return true;
                 }
                 return false;
-            })()
+            })();
         """
         clicked = sb.execute_script(js_code)
         if clicked:
@@ -177,10 +177,9 @@ def handle_consent_dialog(sb):
     return False
 
 # 深度检测 Turnstile 验证状态及弹窗续期按钮状态
-# 深度检测 Turnstile 验证状态及弹窗续期按钮状态
 def check_turnstile_status(sb):
     js_code = """
-        (() => {
+        return (() => {
             const tokenInput = document.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"], [name="cf-turnstile-response"]');
             const tokenVal = tokenInput ? (tokenInput.value || '').trim() : '';
             
@@ -210,7 +209,7 @@ def check_turnstile_status(sb):
                 btnEnabled: btnEnabled,
                 btnText: modalBtn ? (modalBtn.innerText || modalBtn.textContent || '').trim() : ''
             };
-        })()
+        })();
     """
     try:
         res = sb.execute_script(js_code)
@@ -243,7 +242,7 @@ def click_turnstile_checkbox(sb):
     # 1. 优先获取 Turnstile iframe 或容器的精准坐标
     try:
         coords = sb.execute_script("""
-            (() => {
+            return (() => {
                 const iframes = Array.from(document.querySelectorAll('iframe'));
                 let f = iframes.find(i => {
                     const src = (i.src || '').toLowerCase();
@@ -277,7 +276,7 @@ def click_turnstile_checkbox(sb):
                     };
                 }
                 return null;
-            })()
+            })();
         """)
         if coords and coords.get("x") and coords.get("y"):
             print(f"🎯 定位到 Turnstile [{coords.get('src')}] 坐标: ({coords['x']}, {coords['y']})，正在通过 CDP 模拟原生点击...")
@@ -756,7 +755,7 @@ def main():
             if not modal_button_clicked:
                 try:
                     js_click = """
-                        (() => {
+                        return (() => {
                             const elements = Array.from(document.querySelectorAll('button, a, div[role="button"], [class*="button"]'));
                             const btn = elements.find(b => {
                                 const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
@@ -767,7 +766,7 @@ def main():
                                 return true;
                             }
                             return false;
-                        })()
+                        })();
                     """
                     clicked = sb.execute_script(js_click)
                     if clicked:
