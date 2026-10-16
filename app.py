@@ -333,8 +333,8 @@ def wait_for_turnstile_pass(sb, timeout=60):
     last_click_time = 0
     while time.time() - start < timeout:
         status = check_turnstile_status(sb)
-        if status["hasToken"] or status["btnEnabled"]:
-            print(f"✅ Turnstile 人机验证已通过！(Token长度: {status['tokenLen']}, 续期按钮已就绪: {status['btnEnabled']})")
+        if status["hasToken"] and status["tokenLen"] > 10:
+            print(f"✅ Turnstile 人机验证已通过！(有效 Token 长度: {status['tokenLen']})")
             return True
 
         # 如果弹窗确实被关闭，重新尝试点击外部续期按钮
@@ -359,14 +359,14 @@ def wait_for_turnstile_pass(sb, timeout=60):
 
         sb.sleep(2)
         status = check_turnstile_status(sb)
-        if status["hasToken"] or status["btnEnabled"]:
-            print(f"✅ Turnstile 人机验证已通过！(Token长度: {status['tokenLen']}, 续期按钮已就绪: {status['btnEnabled']})")
+        if status["hasToken"] and status["tokenLen"] > 10:
+            print(f"✅ Turnstile 人机验证已通过！(有效 Token 长度: {status['tokenLen']})")
             return True
 
         elapsed = int(time.time() - start)
         print(f"⏳ 正在等待 Turnstile 验证就绪... 已耗时 {elapsed}s")
 
-    print(f"❌ Turnstile 验证超时（{timeout}s 未能生成有效 Token 或解除按钮禁用）")
+    print(f"❌ Turnstile 验证超时（{timeout}s 未能生成有效 Token）")
     return False
     
 # 获取当前出口ip
