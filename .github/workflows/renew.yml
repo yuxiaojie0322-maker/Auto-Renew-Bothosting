@@ -50,7 +50,7 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
-          xvfb-run --auto-servernum -s "-screen 0 1920x1080x24" python3 app.py
+          xvfb-run --auto-servernum python3 app.py
 
       - name: 📸 上传调试截图(若有)
         if: always()

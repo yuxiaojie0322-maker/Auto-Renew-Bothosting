@@ -68,12 +68,8 @@ def update_github_secret(secret_name, new_value):
         env = os.environ.copy()
         if GH_TOKEN:
             env["GH_TOKEN"] = GH_TOKEN
-        cmd = ["gh", "secret", "set", secret_name, "--body", new_value]
-        repo = os.environ.get("GITHUB_REPOSITORY", "")
-        if repo:
-            cmd.extend(["-R", repo])
         proc = subprocess.run(
-            cmd,
+            ["gh", "secret", "set", secret_name, "--body", new_value],
             capture_output=True, text=True, timeout=30, check=False,
             env=env
         )
@@ -128,318 +124,18 @@ def format_notification(status: str, extra: str = "", error: str = "", expiry_da
     lines.append(f"⏱️ 登录时间: {now}")
     return "\n".join(lines)
 
-# 检测并自动关闭 GDPR / Cookie 授权弹窗（避免遮挡主要界面与点击）
-def handle_consent_dialog(sb):
-    print("🛡️ 检测是否存在 GDPR / Cookie 授权遮罩弹窗...")
-    consent_selectors = [
-        'button:contains("Consent")',
-        'button:contains("Do not consent")',
-        '.fc-cta-consent',
-        '.fc-cta-do-not-consent',
-        'button[aria-label="Consent"]',
-        'button[aria-label="Do not consent"]',
-        'button:contains("Accept")',
-        'button:contains("Agree")',
-    ]
-    for sel in consent_selectors:
-        try:
-            if sb.is_element_visible(sel):
-                print(f"👉 检测到授权弹窗，点击: {sel}")
-                sb.click(sel)
-                sb.sleep(2)
-                print("✅ 已关闭授权弹窗")
-                return True
-        except Exception:
-            pass
-
-    try:
-        js_code = """
-            return (() => {
-                const buttons = Array.from(document.querySelectorAll('button'));
-                const btn = buttons.find(b => {
-                    const t = (b.innerText || b.textContent || '').trim().toLowerCase();
-                    return t === 'consent' || t === 'do not consent' || t === 'accept' || t === 'agree';
-                });
-                if (btn) {
-                    btn.click();
-                    return true;
-                }
-                return false;
-            })();
-        """
-        clicked = sb.execute_script(js_code)
-        if clicked:
-            print("✅ 已通过 JS 关闭授权弹窗")
-            sb.sleep(2)
-            return True
-    except Exception:
-        pass
-    return False
-
-# 深度检测 Turnstile 验证状态及弹窗续期按钮状态
-def check_turnstile_status(sb):
-    js_code = """
-        return (() => {
-            try {
-                const tokenInputs = Array.from(document.querySelectorAll('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"], [name="cf-turnstile-response"]'));
-                let tokenVal = '';
-                for (const inp of tokenInputs) {
-                    const v = (inp.value || '').trim();
-                    if (v.length > tokenVal.length) tokenVal = v;
-                }
-                
-                let tokenByApi = '';
-                try {
-                    if (window.turnstile && typeof window.turnstile.getResponse === 'function') {
-                        tokenByApi = (window.turnstile.getResponse() || '').trim();
-                    }
-                } catch(e) {}
-                
-                const hasToken = (tokenVal.length > 10) || (tokenByApi.length > 10);
-                
-                const allElements = Array.from(document.querySelectorAll('button, a, div[role="button"], span'));
-                const modalBtn = allElements.find(b => {
-                    const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-                    return txt.includes('renew for 4') || txt === 'renew for 4 days';
-                });
-                
-                // 判断弹窗是否依然存在（标题或按钮）
-                const bodyTxt = document.body ? (document.body.innerText || document.body.textContent || '') : '';
-                const isModalOpen = bodyTxt.includes('Renew your Free plan') || bodyTxt.includes('Renew for 4 days') || Boolean(modalBtn);
-
-                const btnEnabled = modalBtn ? (!modalBtn.disabled && !modalBtn.hasAttribute('disabled') && !modalBtn.classList.contains('disabled') && !modalBtn.classList.contains('opacity-50')) : false;
-                
-                return {
-                    hasToken: hasToken,
-                    tokenLen: Math.max(tokenVal.length, tokenByApi.length),
-                    btnFound: isModalOpen,
-                    btnEnabled: btnEnabled,
-                    btnText: modalBtn ? (modalBtn.innerText || modalBtn.textContent || '').trim() : ''
-                };
-            } catch(outerErr) {
-                return {
-                    hasToken: false,
-                    tokenLen: 0,
-                    btnFound: true,
-                    btnEnabled: false,
-                    btnText: ''
-                };
-            }
-        })();
-    """
-    try:
-        res = sb.execute_script(js_code)
-        if isinstance(res, dict):
-            return res
-    except Exception as e:
-        print(f"⚠️ 执行 Turnstile 状态检测异常: {e}")
-    return {"hasToken": False, "tokenLen": 0, "btnFound": True, "btnEnabled": False, "btnText": ""}
-
-# 保护弹窗不被遮罩层误触关闭
-def protect_modal(sb):
-    js_protect = """
-        (() => {
-            try {
-                // 仅对独立的遮罩层阻止 pointer-events，不影响弹窗本体
-                const backdrops = Array.from(document.querySelectorAll('.fixed, .inset-0')).filter(el => {
-                    return !el.querySelector('button, iframe, input, [role="dialog"]');
-                });
-                backdrops.forEach(el => {
-                    el.style.pointerEvents = 'none';
-                });
-            } catch(e) {}
-        })()
-    """
-    try:
-        sb.execute_script(js_protect)
-    except Exception:
-        pass
-
-def cdp_click_at(sb, x, y):
-    """参考 HidenCloud：通过 CDP 模拟真实真人分多步平滑移动并注入原生鼠标事件"""
-    try:
-        sx = x - random.uniform(50, 110)
-        sy = y - random.uniform(35, 75)
-        steps = random.randint(8, 14)
-        for i in range(1, steps + 1):
-            ix = sx + (x - sx) * i / steps + random.uniform(-1.5, 1.5)
-            iy = sy + (y - sy) * i / steps + random.uniform(-1.5, 1.5)
-            sb.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": ix, "y": iy})
-            time.sleep(random.uniform(0.01, 0.03))
-        time.sleep(random.uniform(0.1, 0.2))
-        sb.execute_cdp_cmd("Input.dispatchMouseEvent", {
-            "type": "mousePressed", "x": x, "y": y,
-            "button": "left", "buttons": 1, "clickCount": 1
-        })
-        time.sleep(random.uniform(0.06, 0.12))
-        sb.execute_cdp_cmd("Input.dispatchMouseEvent", {
-            "type": "mouseReleased", "x": x, "y": y,
-            "button": "left", "clickCount": 1
-        })
-        return True
-    except Exception as e:
-        print(f"⚠️ CDP 拟人鼠标点击异常: {e}")
-        return False
-
-# 精准点击 Turnstile 验证码复选框（参考 HidenCloud 核心定位策略）
-def click_turnstile_checkbox(sb):
-    # 1. 尝试多维度获取 Turnstile 复选框或容器的绝对屏幕坐标
-    try:
-        coords = sb.execute_script("""
-            return (() => {
-                try {
-                    // A. HidenCloud 核心策略：从 Light DOM 中必定存在的 cf-turnstile-response 输入框向上回溯 1~5 级父容器
-                    const inputs = Array.from(document.querySelectorAll('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]'));
-                    for (const inp of inputs) {
-                        let p = inp.parentElement;
-                        for (let i = 0; i < 5 && p; i++) {
-                            const r = p.getBoundingClientRect();
-                            if (r.width > 50 && r.height > 20) {
-                                const off_x = Math.min(30, r.width / 2);
-                                return {
-                                    x: Math.round(r.left + off_x),
-                                    y: Math.round(r.top + r.height / 2),
-                                    w: Math.round(r.width),
-                                    h: Math.round(r.height),
-                                    src: 'hiden-input-parent'
-                                };
-                            }
-                            p = p.parentElement;
-                        }
-                    }
-
-                    // B. 深度穿透查找所有 Shadow DOM 内部以及普通 DOM 的 iframe
-                    function getAllIframes(root) {
-                        let frames = [];
-                        const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null, false);
-                        while (walker.nextNode()) {
-                            const el = walker.currentNode;
-                            if (el.tagName === 'IFRAME') frames.push(el);
-                            if (el.shadowRoot) frames = frames.concat(getAllIframes(el.shadowRoot));
-                        }
-                        return frames;
-                    }
-                    const allIframes = getAllIframes(document);
-                    for (const f of allIframes) {
-                        const r = f.getBoundingClientRect();
-                        const src = (f.src || '').toLowerCase();
-                        if ((src.includes('cloudflare') || src.includes('challenges') || (r.width >= 100 && r.width <= 400 && r.height >= 40 && r.height <= 150)) && r.width > 10 && r.height > 10) {
-                            return {
-                                x: Math.round(r.left + 30),
-                                y: Math.round(r.top + r.height / 2),
-                                w: Math.round(r.width),
-                                h: Math.round(r.height),
-                                src: 'shadow-iframe'
-                            };
-                        }
-                    }
-
-                    // C. 弹窗内部特征文本查找（"Verify you are human"）
-                    const allElements = Array.from(document.querySelectorAll('div, section, span, p, label'));
-                    const verifyBox = allElements.find(el => {
-                        const t = (el.innerText || el.textContent || '').trim();
-                        const r = el.getBoundingClientRect();
-                        return t.includes('Verify you are human') && !t.includes('Renew your Free plan') && r.width >= 80 && r.height >= 30;
-                    });
-                    if (verifyBox) {
-                        const r = verifyBox.getBoundingClientRect();
-                        return {
-                            x: Math.round(r.left + 28),
-                            y: Math.round(r.top + r.height / 2),
-                            w: Math.round(r.width),
-                            h: Math.round(r.height),
-                            src: 'verify-text-box'
-                        };
-                    }
-
-                    // D. "Bot check" 标题下方锚点偏移定位
-                    const botCheckTitle = allElements.find(el => {
-                        const t = (el.innerText || el.textContent || '').trim();
-                        return t === 'Bot check' || t.includes('Bot check');
-                    });
-                    if (botCheckTitle) {
-                        const r = botCheckTitle.getBoundingClientRect();
-                        if (r.width > 0 && r.height > 0) {
-                            return {
-                                x: Math.round(r.left + 35),
-                                y: Math.round(r.bottom + 42),
-                                w: 300,
-                                h: 65,
-                                src: 'bot-check-title-offset'
-                            };
-                        }
-                    }
-                } catch(e) {}
-
-                return null;
-            })();
-        """)
-        if coords and coords.get("x") and coords.get("y"):
-            print(f"🎯 定位到 Turnstile [{coords.get('src')}] 坐标: ({coords['x']}, {coords['y']})，模拟拟人真实轨迹移动与点击...")
-            success = cdp_click_at(sb, coords["x"], coords["y"])
-            if success:
-                print("✅ 真实拟人鼠标轨迹点击完成")
-                return True
-        else:
-            print("⚠️ 未能获取到 Turnstile 坐标 (coords 为空)")
-    except Exception as e:
-        print(f"⚠️ CDP 点击异常: {e}")
-
-    # 备用方案：尝试用 SeleniumBase 内置 uc_click 点击 iframe
-    try:
-        if sb.is_element_visible('iframe'):
-            sb.uc_click('iframe')
-            print("👉 已通过 sb.uc_click('iframe') 触发点击")
-            return True
-    except Exception:
-        pass
-
-    return False
-
-# 等待并执行 Turnstile 人机验证（参考 HidenCloud：适度点击 + 充足冷却等待）
-def wait_for_turnstile_pass(sb, timeout=75):
+# 等待Turnstile验证通过
+def wait_for_turnstile_pass(sb, timeout=30):
     start = time.time()
-    sb.sleep(2)
-    protect_modal(sb)
-    
-    last_click_time = 0
+    cf_indicators = ["verify you are human", "确认您是真人", "troubleshoot", "just a moment"]
     while time.time() - start < timeout:
-        status = check_turnstile_status(sb)
-        if status["hasToken"] and status["tokenLen"] > 10:
-            print(f"✅ Turnstile 人机验证已通过！(有效 Token 长度: {status['tokenLen']})")
+        page_lower = sb.get_page_source().lower()
+        if not any(x in page_lower for x in cf_indicators):
+            print("✅ Turnstile 验证已通过")
+            # sb.save_screenshot("turnstile_passed.png")
             return True
-
-        # 如果弹窗确实被关闭，重新尝试点击外部续期按钮
-        if not status["btnFound"]:
-            print("⚠️ 检测到弹窗已关闭，尝试重新点击外部续期按钮...")
-            try:
-                for sel in ['button:contains("Renew free plan")', 'button:contains("Renew")']:
-                    if sb.is_element_visible(sel):
-                        sb.click(sel)
-                        sb.sleep(3)
-                        protect_modal(sb)
-                        break
-            except Exception:
-                pass
-
-        # 参考 HidenCloud：至少间隔 5 秒才触发一次点击，点击后留出 4 秒让 Cloudflare 旋转验证
-        if time.time() - last_click_time > 5:
-            protect_modal(sb)
-            clicked = click_turnstile_checkbox(sb)
-            if clicked:
-                last_click_time = time.time()
-                sb.sleep(4)  # 留出充足时间让 Cloudflare 校验
-
-        sb.sleep(2)
-        status = check_turnstile_status(sb)
-        if status["hasToken"] and status["tokenLen"] > 10:
-            print(f"✅ Turnstile 人机验证已通过！(有效 Token 长度: {status['tokenLen']})")
-            return True
-
-        elapsed = int(time.time() - start)
-        print(f"⏳ 正在等待 Turnstile 验证就绪... 已耗时 {elapsed}s")
-
-    print(f"❌ Turnstile 验证超时（{timeout}s 未能生成有效 Token）")
+        sb.sleep(1)
+    print("❌ Turnstile 验证超时未通过")
     return False
     
 # 获取当前出口ip
@@ -697,7 +393,6 @@ def main():
             if "/a/billings" in current_url and "/login" not in current_url and "error=" not in current_url:
                 login_ok = True
                 print("✅ SESSION_TOKEN 登录成功, 当前已到达账单页")
-                handle_consent_dialog(sb)
             else:
                 print(f"❌ SESSION_TOKEN 登录失败，当前URL: {current_url}, 当前标题: {current_title}")
 
@@ -733,10 +428,6 @@ def main():
 
         if _LOGIN_METHOD == "Discord Token":
             print("ℹ️ 本次使用 Discord OAuth 登录，新的 SESSION_TOKEN 将自动更新到 Secrets")
-
-        # 确保无遮罩弹窗阻挡页面交互
-        handle_consent_dialog(sb)
-        sb.sleep(1)
 
         # 提取当前到期日期
         sb.sleep(2)
@@ -776,160 +467,88 @@ def main():
 
         # 点击外部续期按钮等待弹窗
         if outer_renew_selector:
-            # 确保关闭可能阻挡点击的 Consent 弹窗
-            handle_consent_dialog(sb)
-            print("🔄 点击外部续期按钮，等待弹窗加载...")
-            sb.save_screenshot("step1_before_outer_click.png")
+            print("🔄 点击外部续期按钮，等待验证窗口...")
             try:
-                sb.sleep(1)
+                sb.sleep(2)
                 sb.click(outer_renew_selector)
-                print("✅ 外部续期按钮已点击")
-                sb.sleep(8)  # 等待模态框及其内的 Turnstile 组件加载
-                protect_modal(sb)
-                sb.save_screenshot("step2_modal_opened.png")
+                sb.sleep(15)  # 等待模态框加载，可能因网络因素加载慢
             except Exception as e:
                 print(f"❌ 点击外部按钮失败: {e}")
-                sb.save_screenshot("step2_outer_click_failed.png")
                 send_telegram_message(format_notification("❌ 续期失败", error="点击外部续期按钮出错"))
                 return
 
             # 处理弹窗中的 Turnstile
-            print("🔒 检测弹窗中的 Turnstile 验证状态...")
-            protect_modal(sb)
-            turnstile_passed = wait_for_turnstile_pass(sb, timeout=60)
-            sb.save_screenshot("step3_turnstile_status.png")
+            print("🔒 检测弹窗中的 Turnstile 验证...")
+            turnstile_passed = False
+            for attempt in range(1, 4):
+                try:
+                    sb.uc_gui_click_captcha()
+                    time.sleep(12)
+                except Exception as e:
+                    print(f"⚠️ 点击 Turnstile 出错: {e}")
+
+                if wait_for_turnstile_pass(sb, timeout=20):
+                    turnstile_passed = True
+                    break
+                else:
+                    print(f"⏳ 第 {attempt} 次未通过，重试点击...")
 
             if not turnstile_passed:
                 print("❌ Turnstile 验证最终未通过，脚本退出")
-                send_telegram_message(format_notification("❌ 续期失败", error="Turnstile 人机验证未通过或超时"))
+                send_telegram_message(format_notification("❌ 续期失败", error="Turnstile 验证未通过"))
                 return
 
-            # 点击弹窗续期按钮
-            print("⏳ 弹窗验证通过，准备点击 'Renew for 4 days' 确认按钮...")
-            sb.sleep(2)
-            sb.save_screenshot("step4_before_modal_click.png")
+            # 点击续期按钮
+            print("⏳ 等待续期按钮可用并点击...")
+            time.sleep(5) 
 
             modal_button_clicked = False
-            modal_selectors = [
-                'button:contains("Renew for 4 days")',
-                'button:contains("Renew for 4 Days")',
-                'button:contains("Renew for 4")',
-            ]
-            for m_sel in modal_selectors:
-                try:
-                    if sb.is_element_visible(m_sel):
-                        sb.click(m_sel, timeout=5)
-                        modal_button_clicked = True
-                        print(f"✅ 已通过选择器点击弹窗确认按钮: {m_sel}")
-                        break
-                except Exception as e:
-                    print(f"⚠️ 选择器点击弹窗按钮失败: {e}")
-
-            if not modal_button_clicked:
-                try:
-                    js_click = """
-                        return (() => {
-                            const elements = Array.from(document.querySelectorAll('button, a, div[role="button"], [class*="button"]'));
-                            const btn = elements.find(b => {
-                                const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-                                return txt.includes('renew for 4');
-                            });
-                            if (btn) {
-                                btn.click();
-                                return true;
-                            }
-                            return false;
-                        })();
-                    """
-                    clicked = sb.execute_script(js_click)
-                    if clicked:
-                        modal_button_clicked = True
-                        print("✅ 已通过 JavaScript 触发弹窗续期按钮点击")
-                except Exception as e:
-                    print(f"❌ JS 点击弹窗按钮异常: {e}")
-
-            if not modal_button_clicked:
-                print("❌ 未能点击弹窗中的确认续期按钮！")
-                sb.save_screenshot("step4_modal_click_failed.png")
-                send_telegram_message(format_notification("❌ 续期失败", error="未能点击弹窗内的续期确认按钮"))
-                return
-
-            print("⏳ 已点击确认续期，等待服务端异步处理 (等待10秒)...")
-            sb.sleep(10)
-            sb.save_screenshot("step5_after_modal_click.png")
-
-            # 先检查当前页面（SPA局部更新）
-            page_text = sb.get_page_source()
-            match = re.search(r"Renew in (\d{2}:\d{2}:\d{2})", page_text)
-            new_expiry = extract_expiry_date(page_text)
-
-            # 如果当前页面没有倒计时且到期日期未变，刷新账单页验证服务端持久化数据
-            if not match and (not new_expiry or new_expiry == current_expiry):
-                print("🔄 重新加载账单页以获取服务端最新状态...")
-                sb.open("https://bot-hosting.net/a/billings")
-                sb.wait_for_ready_state_complete()
-                sb.sleep(4)
-                page_text = sb.get_page_source()
-                match = re.search(r"Renew in (\d{2}:\d{2}:\d{2})", page_text)
-                new_expiry = extract_expiry_date(page_text)
-
-            sb.save_screenshot("step6_after_reload.png")
-
-            # 检查页面是否仍然留有未续期的外部按钮
-            still_has_renew_button = False
             try:
-                for sel in ['button:contains("Renew free plan")', 'button:contains("Renew")']:
-                    if sb.is_element_visible(sel):
-                        txt = sb.get_text(sel)
-                        if "Renew" in txt and "Renew in" not in txt:
-                            still_has_renew_button = True
-                            break
-            except Exception:
-                pass
+                selector = 'div[role="dialog"] button.btn-primary' 
+                sb.click(selector, timeout=8)
+                modal_button_clicked = True
+                print("✅ 已点击续期按钮")
+            except Exception as e:
+                print(f"续期按钮点击失败: {e}")
 
-            # 严格结果判定，绝不虚假上报成功
-            if match:
-                new_countdown = match.group(1)
-                friendly_countdown = format_countdown(new_countdown)
-                print(f"✅ 续期成功！下次可续期倒计时: {new_countdown} ({friendly_countdown})")
+            print("⏳ 等待新的过期时间...")
+            sb.sleep(6)
+
+            # 提取新的到期日期和倒计时
+            new_page_text = sb.get_page_source()
+            new_expiry = extract_expiry_date(new_page_text)
+            new_match = re.search(r"Renewal cooldown (\d{2}:\d{2}:\d{2})", new_page_text)
+            if new_match:
+                new_countdown = new_match.group(1)
+                print(f"✅ 续期成功！新的倒计时: {new_countdown}")
                 if new_expiry:
-                    print(f"📅 最新到期日期: {new_expiry}")
+                    print(f"📅 新的到期日期: {new_expiry}")
                 send_telegram_message(
                     format_notification(
                         "✅ 续期成功",
-                        extra=f"⏱️ 下次可续期时间: {friendly_countdown}后",
-                        expiry_date=new_expiry or current_expiry or "（未获取到）"
-                    )
-                )
-            elif new_expiry and new_expiry != current_expiry:
-                print(f"✅ 续期成功，到期日期已更新为: {new_expiry}")
-                send_telegram_message(
-                    format_notification(
-                        "✅ 续期成功",
-                        extra=f"📅 到期日期已更新 ({current_expiry} ➔ {new_expiry})",
-                        expiry_date=new_expiry
-                    )
-                )
-            elif not still_has_renew_button and modal_button_clicked:
-                # 续期按钮已消失（进入正常锁定状态）
-                print(f"✅ 续期按钮已消失，续期成功生效！")
-                send_telegram_message(
-                    format_notification(
-                        "✅ 续期成功",
-                        extra="可续期按钮已更新锁定",
-                        expiry_date=new_expiry or current_expiry or "（未获取到）"
+                        extra=f"⏱️ 可续期时间: {format_countdown(new_countdown)}后",
+                        expiry_date=new_expiry or "（未获取到）"
                     )
                 )
             else:
-                # 依然存在“Renew free plan”按钮且到期时间无变化 -> 确凿的续期未生效
-                print(f"❌ 续期未生效：页面仍保留可续期按钮，到期时间仍为 {current_expiry}！")
-                send_telegram_message(
-                    format_notification(
-                        "⚠️ 续期未成功生效",
-                        extra=f"脚本已尝试点击，但服务端未接受续期（页面仍显示可续期，到期日仍为 {current_expiry}）。请手动在网页端续期，并可在 GitHub Actions 检查上传的截图制品排查原因。",
-                        expiry_date=current_expiry or "（未获取到）"
+                if new_expiry and new_expiry != current_expiry:
+                    print(f"✅ 续期成功，到期日期已更新为: {new_expiry}")
+                    send_telegram_message(
+                        format_notification(
+                            "✅ 续期成功",
+                            extra="到期日期已更新",
+                            expiry_date=new_expiry
+                        )
                     )
-                )
+                else:
+                    print("⚠️ 续期结果未知，到期日期未变化，请手动检查")
+                    send_telegram_message(
+                        format_notification(
+                            "⚠️ 续期可能未成功",
+                            extra="请登录后台检查",
+                            expiry_date=current_expiry or "（未获取到）"
+                        )
+                    )
 
         else:
             if countdown_text:
