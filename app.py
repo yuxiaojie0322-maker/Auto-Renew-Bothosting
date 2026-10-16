@@ -255,59 +255,117 @@ def protect_modal(sb):
     except Exception:
         pass
 
-# 精准点击 Turnstile 验证码复选框
+def cdp_click_at(sb, x, y):
+    """参考 HidenCloud：通过 CDP 模拟真实真人分多步平滑移动并注入原生鼠标事件"""
+    try:
+        sx = x - random.uniform(50, 110)
+        sy = y - random.uniform(35, 75)
+        steps = random.randint(8, 14)
+        for i in range(1, steps + 1):
+            ix = sx + (x - sx) * i / steps + random.uniform(-1.5, 1.5)
+            iy = sy + (y - sy) * i / steps + random.uniform(-1.5, 1.5)
+            sb.execute_cdp_cmd("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": ix, "y": iy})
+            time.sleep(random.uniform(0.01, 0.03))
+        time.sleep(random.uniform(0.1, 0.2))
+        sb.execute_cdp_cmd("Input.dispatchMouseEvent", {
+            "type": "mousePressed", "x": x, "y": y,
+            "button": "left", "buttons": 1, "clickCount": 1
+        })
+        time.sleep(random.uniform(0.06, 0.12))
+        sb.execute_cdp_cmd("Input.dispatchMouseEvent", {
+            "type": "mouseReleased", "x": x, "y": y,
+            "button": "left", "clickCount": 1
+        })
+        return True
+    except Exception as e:
+        print(f"⚠️ CDP 拟人鼠标点击异常: {e}")
+        return False
+
+# 精准点击 Turnstile 验证码复选框（参考 HidenCloud 核心定位策略）
 def click_turnstile_checkbox(sb):
     # 1. 尝试多维度获取 Turnstile 复选框或容器的绝对屏幕坐标
     try:
         coords = sb.execute_script("""
             return (() => {
                 try {
-                    // A. 遍历页面所有 iframe（包括深度查找）
-                    const iframes = Array.from(document.querySelectorAll('iframe'));
-                    for (const i of iframes) {
-                        const src = (i.src || '').toLowerCase();
-                        const r = i.getBoundingClientRect();
-                        if ((src.includes('cloudflare') || src.includes('challenges') || (r.width >= 100 && r.width <= 400 && r.height >= 40 && r.height <= 150)) && r.width > 0 && r.height > 0) {
+                    // A. HidenCloud 核心策略：从 Light DOM 中必定存在的 cf-turnstile-response 输入框向上回溯 1~5 级父容器
+                    const inputs = Array.from(document.querySelectorAll('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]'));
+                    for (const inp of inputs) {
+                        let p = inp.parentElement;
+                        for (let i = 0; i < 5 && p; i++) {
+                            const r = p.getBoundingClientRect();
+                            if (r.width > 50 && r.height > 20) {
+                                const off_x = Math.min(30, r.width / 2);
+                                return {
+                                    x: Math.round(r.left + off_x),
+                                    y: Math.round(r.top + r.height / 2),
+                                    w: Math.round(r.width),
+                                    h: Math.round(r.height),
+                                    src: 'hiden-input-parent'
+                                };
+                            }
+                            p = p.parentElement;
+                        }
+                    }
+
+                    // B. 深度穿透查找所有 Shadow DOM 内部以及普通 DOM 的 iframe
+                    function getAllIframes(root) {
+                        let frames = [];
+                        const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, null, false);
+                        while (walker.nextNode()) {
+                            const el = walker.currentNode;
+                            if (el.tagName === 'IFRAME') frames.push(el);
+                            if (el.shadowRoot) frames = frames.concat(getAllIframes(el.shadowRoot));
+                        }
+                        return frames;
+                    }
+                    const allIframes = getAllIframes(document);
+                    for (const f of allIframes) {
+                        const r = f.getBoundingClientRect();
+                        const src = (f.src || '').toLowerCase();
+                        if ((src.includes('cloudflare') || src.includes('challenges') || (r.width >= 100 && r.width <= 400 && r.height >= 40 && r.height <= 150)) && r.width > 10 && r.height > 10) {
                             return {
                                 x: Math.round(r.left + 30),
                                 y: Math.round(r.top + r.height / 2),
                                 w: Math.round(r.width),
                                 h: Math.round(r.height),
-                                src: 'iframe'
+                                src: 'shadow-iframe'
                             };
                         }
                     }
 
-                    // B. 通过 Turnstile 容器或相关 class 查找
-                    const containers = Array.from(document.querySelectorAll('.cf-turnstile, [data-sitekey], [class*="turnstile"], div[style*="width: 300px"]'));
-                    for (const c of containers) {
-                        const r = c.getBoundingClientRect();
-                        if (r.width > 0 && r.height > 0) {
-                            return {
-                                x: Math.round(r.left + 35),
-                                y: Math.round(r.top + 35),
-                                w: Math.round(r.width),
-                                h: Math.round(r.height),
-                                src: 'container'
-                            };
-                        }
-                    }
-
-                    // C. 通过文本锚点 "Bot check" 相对定位
-                    const allElems = Array.from(document.querySelectorAll('*'));
-                    const botCheckHeader = allElems.find(el => {
+                    // C. 弹窗内部特征文本查找（"Verify you are human"）
+                    const allElements = Array.from(document.querySelectorAll('div, section, span, p, label'));
+                    const verifyBox = allElements.find(el => {
                         const t = (el.innerText || el.textContent || '').trim();
-                        return t === 'Bot check' || t.includes('1 Bot check');
+                        const r = el.getBoundingClientRect();
+                        return t.includes('Verify you are human') && !t.includes('Renew your Free plan') && r.width >= 80 && r.height >= 30;
                     });
-                    if (botCheckHeader) {
-                        const r = botCheckHeader.getBoundingClientRect();
+                    if (verifyBox) {
+                        const r = verifyBox.getBoundingClientRect();
+                        return {
+                            x: Math.round(r.left + 28),
+                            y: Math.round(r.top + r.height / 2),
+                            w: Math.round(r.width),
+                            h: Math.round(r.height),
+                            src: 'verify-text-box'
+                        };
+                    }
+
+                    // D. "Bot check" 标题下方锚点偏移定位
+                    const botCheckTitle = allElements.find(el => {
+                        const t = (el.innerText || el.textContent || '').trim();
+                        return t === 'Bot check' || t.includes('Bot check');
+                    });
+                    if (botCheckTitle) {
+                        const r = botCheckTitle.getBoundingClientRect();
                         if (r.width > 0 && r.height > 0) {
                             return {
                                 x: Math.round(r.left + 35),
-                                y: Math.round(r.bottom + 40),
+                                y: Math.round(r.bottom + 42),
                                 w: 300,
                                 h: 65,
-                                src: 'anchor-bot-check'
+                                src: 'bot-check-title-offset'
                             };
                         }
                     }
@@ -317,39 +375,17 @@ def click_turnstile_checkbox(sb):
             })();
         """)
         if coords and coords.get("x") and coords.get("y"):
-            print(f"🎯 定位到 Turnstile [{coords.get('src')}] 坐标: ({coords['x']}, {coords['y']})，正在通过 CDP 模拟原生真实鼠标移动和点击...")
-            # 模拟鼠标移动到复选框位置
-            sb.execute_cdp_cmd("Input.dispatchMouseEvent", {
-                "type": "mouseMoved",
-                "x": coords["x"],
-                "y": coords["y"]
-            })
-            time.sleep(0.1)
-            # 模拟鼠标按下
-            sb.execute_cdp_cmd("Input.dispatchMouseEvent", {
-                "type": "mousePressed",
-                "x": coords["x"],
-                "y": coords["y"],
-                "button": "left",
-                "clickCount": 1
-            })
-            time.sleep(0.15)
-            # 模拟鼠标抬起
-            sb.execute_cdp_cmd("Input.dispatchMouseEvent", {
-                "type": "mouseReleased",
-                "x": coords["x"],
-                "y": coords["y"],
-                "button": "left",
-                "clickCount": 1
-            })
-            print("✅ CDP 鼠标点击事件已下发")
-            return True
+            print(f"🎯 定位到 Turnstile [{coords.get('src')}] 坐标: ({coords['x']}, {coords['y']})，模拟拟人真实轨迹移动与点击...")
+            success = cdp_click_at(sb, coords["x"], coords["y"])
+            if success:
+                print("✅ 真实拟人鼠标轨迹点击完成")
+                return True
         else:
             print("⚠️ 未能获取到 Turnstile 坐标 (coords 为空)")
     except Exception as e:
         print(f"⚠️ CDP 点击异常: {e}")
 
-    # 2. 备用方案：尝试用 SeleniumBase 内置 uc_click 点击 iframe
+    # 备用方案：尝试用 SeleniumBase 内置 uc_click 点击 iframe
     try:
         if sb.is_element_visible('iframe'):
             sb.uc_click('iframe')
@@ -358,33 +394,10 @@ def click_turnstile_checkbox(sb):
     except Exception:
         pass
 
-    # 2. 备用方案：按尺寸匹配 iframe 穿透进入点击内部元素
-    try:
-        cf_frames = sb.find_elements('iframe')
-        for frame in cf_frames:
-            try:
-                r = sb.execute_script("const r = arguments[0].getBoundingClientRect(); return {w: r.width, h: r.height};", frame)
-                if r and 100 <= r.get('w', 0) <= 400 and 40 <= r.get('h', 0) <= 150:
-                    sb.switch_to_frame(frame)
-                    for sel in ['input[type="checkbox"]', '#cf-stage input', '.cb-i', 'span.mark', 'label.cb-lb', 'label']:
-                        if sb.is_element_visible(sel):
-                            sb.click(sel)
-                            print(f"👉 已在 iframe 内部点击验证元素: {sel}")
-                            sb.switch_to_default_content()
-                            return True
-                    sb.switch_to_default_content()
-            except Exception:
-                sb.switch_to_default_content()
-    except Exception:
-        try:
-            sb.switch_to_default_content()
-        except Exception:
-            pass
-
     return False
 
-# 等待并执行 Turnstile 人机验证
-def wait_for_turnstile_pass(sb, timeout=60):
+# 等待并执行 Turnstile 人机验证（参考 HidenCloud：适度点击 + 充足冷却等待）
+def wait_for_turnstile_pass(sb, timeout=75):
     start = time.time()
     sb.sleep(2)
     protect_modal(sb)
@@ -409,12 +422,13 @@ def wait_for_turnstile_pass(sb, timeout=60):
             except Exception:
                 pass
 
-        # 每隔 4 秒尝试触发一次精准点击
-        if time.time() - last_click_time > 4:
+        # 参考 HidenCloud：至少间隔 5 秒才触发一次点击，点击后留出 4 秒让 Cloudflare 旋转验证
+        if time.time() - last_click_time > 5:
             protect_modal(sb)
             clicked = click_turnstile_checkbox(sb)
             if clicked:
                 last_click_time = time.time()
+                sb.sleep(4)  # 留出充足时间让 Cloudflare 校验
 
         sb.sleep(2)
         status = check_turnstile_status(sb)
