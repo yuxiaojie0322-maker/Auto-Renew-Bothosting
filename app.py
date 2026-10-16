@@ -180,35 +180,51 @@ def handle_consent_dialog(sb):
 def check_turnstile_status(sb):
     js_code = """
         return (() => {
-            const tokenInput = document.querySelector('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"], [name="cf-turnstile-response"]');
-            const tokenVal = tokenInput ? (tokenInput.value || '').trim() : '';
-            
-            let tokenByApi = '';
-            if (window.turnstile && typeof window.turnstile.getResponse === 'function') {
-                try { tokenByApi = (window.turnstile.getResponse() || '').trim(); } catch(e) {}
-            }
-            
-            const hasToken = (tokenVal.length > 10) || (tokenByApi.length > 10);
-            
-            const allElements = Array.from(document.querySelectorAll('button, a, div[role="button"], span'));
-            const modalBtn = allElements.find(b => {
-                const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
-                return txt.includes('renew for 4') || txt === 'renew for 4 days';
-            });
-            
-            // 判断弹窗是否依然存在（标题或按钮）
-            const bodyTxt = document.body ? (document.body.innerText || document.body.textContent || '') : '';
-            const isModalOpen = bodyTxt.includes('Renew your Free plan') || bodyTxt.includes('Renew for 4 days') || Boolean(modalBtn);
+            try {
+                const tokenInputs = Array.from(document.querySelectorAll('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"], [name="cf-turnstile-response"]'));
+                let tokenVal = '';
+                for (const inp of tokenInputs) {
+                    const v = (inp.value || '').trim();
+                    if (v.length > tokenVal.length) tokenVal = v;
+                }
+                
+                let tokenByApi = '';
+                try {
+                    if (window.turnstile && typeof window.turnstile.getResponse === 'function') {
+                        tokenByApi = (window.turnstile.getResponse() || '').trim();
+                    }
+                } catch(e) {}
+                
+                const hasToken = (tokenVal.length > 10) || (tokenByApi.length > 10);
+                
+                const allElements = Array.from(document.querySelectorAll('button, a, div[role="button"], span'));
+                const modalBtn = allElements.find(b => {
+                    const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                    return txt.includes('renew for 4') || txt === 'renew for 4 days';
+                });
+                
+                // 判断弹窗是否依然存在（标题或按钮）
+                const bodyTxt = document.body ? (document.body.innerText || document.body.textContent || '') : '';
+                const isModalOpen = bodyTxt.includes('Renew your Free plan') || bodyTxt.includes('Renew for 4 days') || Boolean(modalBtn);
 
-            const btnEnabled = modalBtn ? (!modalBtn.disabled && !modalBtn.hasAttribute('disabled') && !modalBtn.classList.contains('disabled') && !modalBtn.classList.contains('opacity-50')) : false;
-            
-            return {
-                hasToken: hasToken,
-                tokenLen: Math.max(tokenVal.length, tokenByApi.length),
-                btnFound: isModalOpen,
-                btnEnabled: btnEnabled,
-                btnText: modalBtn ? (modalBtn.innerText || modalBtn.textContent || '').trim() : ''
-            };
+                const btnEnabled = modalBtn ? (!modalBtn.disabled && !modalBtn.hasAttribute('disabled') && !modalBtn.classList.contains('disabled') && !modalBtn.classList.contains('opacity-50')) : false;
+                
+                return {
+                    hasToken: hasToken,
+                    tokenLen: Math.max(tokenVal.length, tokenByApi.length),
+                    btnFound: isModalOpen,
+                    btnEnabled: btnEnabled,
+                    btnText: modalBtn ? (modalBtn.innerText || modalBtn.textContent || '').trim() : ''
+                };
+            } catch(outerErr) {
+                return {
+                    hasToken: false,
+                    tokenLen: 0,
+                    btnFound: true,
+                    btnEnabled: false,
+                    btnText: ''
+                };
+            }
         })();
     """
     try:
@@ -217,19 +233,21 @@ def check_turnstile_status(sb):
             return res
     except Exception as e:
         print(f"⚠️ 执行 Turnstile 状态检测异常: {e}")
-    return {"hasToken": False, "tokenLen": 0, "btnFound": False, "btnEnabled": False, "btnText": ""}
+    return {"hasToken": False, "tokenLen": 0, "btnFound": True, "btnEnabled": False, "btnText": ""}
 
 # 保护弹窗不被遮罩层误触关闭
 def protect_modal(sb):
     js_protect = """
         (() => {
-            // 仅对独立的遮罩层阻止 pointer-events，不影响弹窗本体
-            const backdrops = Array.from(document.querySelectorAll('.fixed, .inset-0')).filter(el => {
-                return !el.querySelector('button, iframe, input, [role="dialog"]');
-            });
-            backdrops.forEach(el => {
-                el.style.pointerEvents = 'none';
-            });
+            try {
+                // 仅对独立的遮罩层阻止 pointer-events，不影响弹窗本体
+                const backdrops = Array.from(document.querySelectorAll('.fixed, .inset-0')).filter(el => {
+                    return !el.querySelector('button, iframe, input, [role="dialog"]');
+                });
+                backdrops.forEach(el => {
+                    el.style.pointerEvents = 'none';
+                });
+            } catch(e) {}
         })()
     """
     try:
@@ -239,68 +257,61 @@ def protect_modal(sb):
 
 # 精准点击 Turnstile 验证码复选框
 def click_turnstile_checkbox(sb):
-    # 0. 优先尝试 SeleniumBase UC 模式内置验证码点击器
-    try:
-        if hasattr(sb, "uc_gui_click_captcha"):
-            print("🤖 尝试调用 SeleniumBase 内置 uc_gui_click_captcha()...")
-            sb.uc_gui_click_captcha()
-            sb.sleep(1)
-    except Exception as e:
-        print(f"⚠️ 内置 uc_gui_click_captcha 跳过: {e}")
-
     # 1. 尝试多维度获取 Turnstile 复选框或容器的绝对屏幕坐标
     try:
         coords = sb.execute_script("""
             return (() => {
-                // A. 遍历页面所有 iframe（包括深度查找）
-                const iframes = Array.from(document.querySelectorAll('iframe'));
-                for (const i of iframes) {
-                    const src = (i.src || '').toLowerCase();
-                    const r = i.getBoundingClientRect();
-                    if ((src.includes('cloudflare') || src.includes('challenges') || (r.width >= 100 && r.width <= 400 && r.height >= 40 && r.height <= 150)) && r.width > 0 && r.height > 0) {
-                        return {
-                            x: Math.round(r.left + 30),
-                            y: Math.round(r.top + r.height / 2),
-                            w: Math.round(r.width),
-                            h: Math.round(r.height),
-                            src: 'iframe'
-                        };
+                try {
+                    // A. 遍历页面所有 iframe（包括深度查找）
+                    const iframes = Array.from(document.querySelectorAll('iframe'));
+                    for (const i of iframes) {
+                        const src = (i.src || '').toLowerCase();
+                        const r = i.getBoundingClientRect();
+                        if ((src.includes('cloudflare') || src.includes('challenges') || (r.width >= 100 && r.width <= 400 && r.height >= 40 && r.height <= 150)) && r.width > 0 && r.height > 0) {
+                            return {
+                                x: Math.round(r.left + 30),
+                                y: Math.round(r.top + r.height / 2),
+                                w: Math.round(r.width),
+                                h: Math.round(r.height),
+                                src: 'iframe'
+                            };
+                        }
                     }
-                }
 
-                // B. 通过 Turnstile 容器或相关 class 查找
-                const containers = Array.from(document.querySelectorAll('.cf-turnstile, [data-sitekey], [class*="turnstile"], div[style*="width: 300px"]'));
-                for (const c of containers) {
-                    const r = c.getBoundingClientRect();
-                    if (r.width > 0 && r.height > 0) {
-                        return {
-                            x: Math.round(r.left + 35),
-                            y: Math.round(r.top + 35),
-                            w: Math.round(r.width),
-                            h: Math.round(r.height),
-                            src: 'container'
-                        };
+                    // B. 通过 Turnstile 容器或相关 class 查找
+                    const containers = Array.from(document.querySelectorAll('.cf-turnstile, [data-sitekey], [class*="turnstile"], div[style*="width: 300px"]'));
+                    for (const c of containers) {
+                        const r = c.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) {
+                            return {
+                                x: Math.round(r.left + 35),
+                                y: Math.round(r.top + 35),
+                                w: Math.round(r.width),
+                                h: Math.round(r.height),
+                                src: 'container'
+                            };
+                        }
                     }
-                }
 
-                // C. 通过文本锚点 "Bot check" 相对定位
-                const allElems = Array.from(document.querySelectorAll('*'));
-                const botCheckHeader = allElems.find(el => {
-                    const t = (el.innerText || el.textContent || '').trim();
-                    return t === 'Bot check' || t.includes('1 Bot check');
-                });
-                if (botCheckHeader) {
-                    const r = botCheckHeader.getBoundingClientRect();
-                    if (r.width > 0 && r.height > 0) {
-                        return {
-                            x: Math.round(r.left + 35),
-                            y: Math.round(r.bottom + 40),
-                            w: 300,
-                            h: 65,
-                            src: 'anchor-bot-check'
-                        };
+                    // C. 通过文本锚点 "Bot check" 相对定位
+                    const allElems = Array.from(document.querySelectorAll('*'));
+                    const botCheckHeader = allElems.find(el => {
+                        const t = (el.innerText || el.textContent || '').trim();
+                        return t === 'Bot check' || t.includes('1 Bot check');
+                    });
+                    if (botCheckHeader) {
+                        const r = botCheckHeader.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) {
+                            return {
+                                x: Math.round(r.left + 35),
+                                y: Math.round(r.bottom + 40),
+                                w: 300,
+                                h: 65,
+                                src: 'anchor-bot-check'
+                            };
+                        }
                     }
-                }
+                } catch(e) {}
 
                 return null;
             })();
@@ -337,6 +348,15 @@ def click_turnstile_checkbox(sb):
             print("⚠️ 未能获取到 Turnstile 坐标 (coords 为空)")
     except Exception as e:
         print(f"⚠️ CDP 点击异常: {e}")
+
+    # 2. 备用方案：尝试用 SeleniumBase 内置 uc_click 点击 iframe
+    try:
+        if sb.is_element_visible('iframe'):
+            sb.uc_click('iframe')
+            print("👉 已通过 sb.uc_click('iframe') 触发点击")
+            return True
+    except Exception:
+        pass
 
     # 2. 备用方案：按尺寸匹配 iframe 穿透进入点击内部元素
     try:
