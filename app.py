@@ -94,18 +94,39 @@ def send_telegram_message(message: str):
     except Exception as e:
         print(f"❌ Telegram 发送失败: {e}")
 
+# 记录用户展示名称
+_USER_DISPLAY_NAME = ""
+
+# 获取展示用户名
+def get_account_display_name() -> str:
+    if EMAIL:
+        if '@' in EMAIL:
+            name, domain = EMAIL.split('@', 1)
+            return f"{name[:2]}****{name[-2:]}@{domain}" if len(name) > 4 else f"{name}@{domain}"
+        return EMAIL[:2] + '****'
+    if _USER_DISPLAY_NAME:
+        return _USER_DISPLAY_NAME
+    if DC_TOKEN:
+        try:
+            r = requests.get(
+                "https://discord.com/api/v9/users/@me",
+                headers={"Authorization": DC_TOKEN},
+                timeout=4
+            )
+            if r.status_code == 200:
+                data = r.json()
+                u = data.get("global_name") or data.get("username")
+                if u:
+                    return f"{u} (Discord)"
+        except Exception:
+            pass
+    return "Bot-Hosting 用户"
+
 # 通知格式
 def format_notification(status: str, extra: str = "", error: str = "", expiry_date: str = "") -> str:
     local_time = time.gmtime(time.time() + 8 * 3600)
     now = time.strftime("%Y-%m-%d %H:%M:%S", local_time)
-    if '@' in EMAIL:
-        name, domain = EMAIL.split('@', 1)
-        if len(name) > 4:
-            masked_email = f"{name[:2]}****{name[-2:]}@{domain}"
-        else:
-            masked_email = f"{name}@{domain}"
-    else:
-        masked_email = EMAIL[:2] + '****' 
+    masked_email = get_account_display_name()
     
     lines = [
         "🇫🇮 Bot-hosting 续期通知",
@@ -437,6 +458,29 @@ def main():
             print(f"📅 当前到期日期: {current_expiry}")
         else:
             print("⚠️ 未能提取当前到期日期")
+
+        # 尝试提取用户展示名称（工作区或用户名）
+        global _USER_DISPLAY_NAME
+        try:
+            js_extract_user = """
+                return (() => {
+                    const aside = document.querySelector('aside, nav, [class*="sidebar"]');
+                    if (aside) {
+                        const m = (aside.innerText || '').match(/([^\n]+'s Workspace)/);
+                        if (m) return m[1];
+                    }
+                    const elems = Array.from(document.querySelectorAll('span, p, div, button'));
+                    const ws = elems.find(e => (e.innerText || '').includes("'s Workspace"));
+                    if (ws) return ws.innerText.trim();
+                    return '';
+                })()
+            """
+            u = sb.execute_script(js_extract_user)
+            if u and u.strip():
+                _USER_DISPLAY_NAME = u.strip()
+                print(f"👤 检测到登录用户: {_USER_DISPLAY_NAME}")
+        except Exception:
+            pass
 
         # 寻找外部续期按钮
         outer_renew_selector = None
