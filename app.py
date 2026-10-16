@@ -216,59 +216,135 @@ def check_turnstile_status(sb):
         print(f"⚠️ 执行 Turnstile 状态检测异常: {e}")
     return {"hasToken": False, "tokenLen": 0, "btnFound": False, "btnEnabled": False, "btnText": ""}
 
+# 保护弹窗不被遮罩层误触关闭
+def protect_modal(sb):
+    js_protect = """
+        (() => {
+            // 锁定遮罩层阻止 pointer-events 或阻止冒泡，避免误触外部关闭弹窗
+            document.querySelectorAll('.fixed, .inset-0, [class*="backdrop"]').forEach(el => {
+                if (!el.querySelector('iframe, button')) {
+                    el.style.pointerEvents = 'none';
+                }
+            });
+            // 阻止 ESC 键或全局点击关闭弹窗
+            window.addEventListener('click', e => {
+                if (e.target && (e.target.classList.contains('fixed') || e.target.classList.contains('inset-0'))) {
+                    e.stopImmediatePropagation();
+                    e.preventDefault();
+                }
+            }, true);
+        })()
+    """
+    try:
+        sb.execute_script(js_protect)
+    except Exception:
+        pass
+
+# 精准点击 Turnstile 验证码复选框
+def click_turnstile_checkbox(sb):
+    # 1. 优先获取 Turnstile iframe 的精准坐标并用 CDP 原生鼠标事件点击
+    try:
+        coords = sb.execute_script("""
+            (() => {
+                const f = document.querySelector('iframe[src*="challenges.cloudflare.com"], iframe[src*="cloudflare.com"]');
+                if (!f) return null;
+                const r = f.getBoundingClientRect();
+                if (r.width === 0 || r.height === 0) return null;
+                return {
+                    x: Math.round(r.left + 30),
+                    y: Math.round(r.top + r.height / 2)
+                };
+            })()
+        """)
+        if coords and coords.get("x") and coords.get("y"):
+            print(f"🎯 定位到 Turnstile 复选框坐标: ({coords['x']}, {coords['y']})，正在通过 CDP 模拟原生点击...")
+            sb.execute_cdp_cmd("Input.dispatchMouseEvent", {
+                "type": "mousePressed",
+                "x": coords["x"],
+                "y": coords["y"],
+                "button": "left",
+                "clickCount": 1
+            })
+            time.sleep(0.12)
+            sb.execute_cdp_cmd("Input.dispatchMouseEvent", {
+                "type": "mouseReleased",
+                "x": coords["x"],
+                "y": coords["y"],
+                "button": "left",
+                "clickCount": 1
+            })
+            return True
+    except Exception as e:
+        print(f"⚠️ CDP 点击异常: {e}")
+
+    # 2. 备用方案：通过 uc_click 点击 iframe 元素
+    try:
+        sb.uc_click('iframe[src*="challenges.cloudflare.com"], iframe[src*="cloudflare.com"]')
+        return True
+    except Exception:
+        pass
+
+    # 3. 备用方案：穿透 iframe 点击内部的 checkbox 或 label（绝不要点 body）
+    try:
+        cf_frames = sb.find_elements('iframe[src*="challenges.cloudflare.com"], iframe[src*="cloudflare.com"]')
+        for frame in cf_frames:
+            try:
+                sb.switch_to_frame(frame)
+                for sel in ['input[type="checkbox"]', '#cf-stage input', '.cb-i', 'span.mark', 'label.cb-lb', 'label']:
+                    if sb.is_element_visible(sel):
+                        sb.click(sel)
+                        sb.switch_to_default_content()
+                        return True
+                sb.switch_to_default_content()
+            except Exception:
+                sb.switch_to_default_content()
+    except Exception:
+        try:
+            sb.switch_to_default_content()
+        except Exception:
+            pass
+
+    return False
+
 # 等待并执行 Turnstile 人机验证
-def wait_for_turnstile_pass(sb, timeout=45):
+def wait_for_turnstile_pass(sb, timeout=60):
     start = time.time()
-    sb.sleep(3)
+    sb.sleep(2)
+    protect_modal(sb)
+    
+    last_click_time = 0
     while time.time() - start < timeout:
         status = check_turnstile_status(sb)
         if status["hasToken"] or status["btnEnabled"]:
             print(f"✅ Turnstile 人机验证已通过！(Token长度: {status['tokenLen']}, 续期按钮已就绪: {status['btnEnabled']})")
             return True
 
-        # 尝试通过 SeleniumBase 内置方法点击验证码
-        try:
-            sb.uc_gui_handle_captcha()
-        except Exception:
-            pass
-
-        sb.sleep(2)
-        status = check_turnstile_status(sb)
-        if status["hasToken"] or status["btnEnabled"]:
-            print(f"✅ Turnstile 人机验证已通过！(Token长度: {status['tokenLen']}, 续期按钮已就绪: {status['btnEnabled']})")
-            return True
-
-        try:
-            sb.uc_gui_click_captcha()
-        except Exception:
-            pass
-
-        sb.sleep(2)
-        status = check_turnstile_status(sb)
-        if status["hasToken"] or status["btnEnabled"]:
-            print(f"✅ Turnstile 人机验证已通过！(Token长度: {status['tokenLen']}, 续期按钮已就绪: {status['btnEnabled']})")
-            return True
-
-        # 尝试穿透进入 iframe 寻找点击复选框
-        try:
-            cf_frames = sb.find_elements('iframe[src*="cloudflare.com"], iframe[src*="challenges.cloudflare.com"]')
-            for frame in cf_frames:
-                try:
-                    sb.switch_to_frame(frame)
-                    for sel in ['input[type="checkbox"]', '#cf-stage input', '.cb-i', 'span.mark', '#challenge-stage input', 'body']:
-                        if sb.is_element_visible(sel):
-                            sb.click(sel)
-                            break
-                    sb.switch_to_default_content()
-                except Exception:
-                    sb.switch_to_default_content()
-        except Exception:
+        # 如果弹窗被意外关闭，重新点击外部续期按钮打开弹窗
+        if not status["btnFound"]:
+            print("⚠️ 检测到弹窗已关闭或未就绪，重新尝试点击外部续期按钮...")
             try:
-                sb.switch_to_default_content()
+                for sel in ['button:contains("Renew free plan")', 'button:contains("Renew")']:
+                    if sb.is_element_visible(sel):
+                        sb.click(sel)
+                        sb.sleep(3)
+                        protect_modal(sb)
+                        break
             except Exception:
                 pass
 
+        # 每隔 5 秒尝试触发一次精准点击
+        if time.time() - last_click_time > 5:
+            protect_modal(sb)
+            clicked = click_turnstile_checkbox(sb)
+            if clicked:
+                last_click_time = time.time()
+
         sb.sleep(2)
+        status = check_turnstile_status(sb)
+        if status["hasToken"] or status["btnEnabled"]:
+            print(f"✅ Turnstile 人机验证已通过！(Token长度: {status['tokenLen']}, 续期按钮已就绪: {status['btnEnabled']})")
+            return True
+
         elapsed = int(time.time() - start)
         print(f"⏳ 正在等待 Turnstile 验证就绪... 已耗时 {elapsed}s")
 
@@ -618,6 +694,7 @@ def main():
                 sb.click(outer_renew_selector)
                 print("✅ 外部续期按钮已点击")
                 sb.sleep(8)  # 等待模态框及其内的 Turnstile 组件加载
+                protect_modal(sb)
                 sb.save_screenshot("step2_modal_opened.png")
             except Exception as e:
                 print(f"❌ 点击外部按钮失败: {e}")
@@ -627,7 +704,8 @@ def main():
 
             # 处理弹窗中的 Turnstile
             print("🔒 检测弹窗中的 Turnstile 验证状态...")
-            turnstile_passed = wait_for_turnstile_pass(sb, timeout=45)
+            protect_modal(sb)
+            turnstile_passed = wait_for_turnstile_pass(sb, timeout=60)
             sb.save_screenshot("step3_turnstile_status.png")
 
             if not turnstile_passed:
